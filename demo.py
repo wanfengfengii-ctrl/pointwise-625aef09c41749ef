@@ -4,7 +4,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from database import connect
-from intake.registry import accept_segment, get_accepted_piece, initialize_intake
+from intake.registry import (
+    accept_committed_segment, accept_segment, get_accepted_piece, initialize_intake,
+)
 from ledger.ingest import record_segment
 from ledger.query import get_revision
 from ledger.storage import initialize_ledger
@@ -12,10 +14,10 @@ from plan.catalog import get_task, initialize_catalog, install_task_snapshot
 from plan.layout import SegmentLayout
 from plan.rationals import rational_text
 from plan.tasks import open_task
-from review.history import get_review
-from review.issue import issue_review
+from review.history import get_amendment, get_review
+from review.issue import issue_amendment, issue_review
 from review.storage import initialize_review
-from station.export import export_segment
+from station.export import export_change_proof, export_committed_segment, export_segment
 from station.freeze import freeze_segment
 from station.storage import initialize_station
 
@@ -145,10 +147,106 @@ def run(root, data):
         )
 
 
+
+def amendment_run(root, data=None):
+    """Show a same-total report pair resolved by a station-side change proof.
+
+    Mirrors ``amendment_cases.MOVED``: readings ``0,1,0,0,0,0`` move one
+    crossing from pair ``(0,1)`` to ``(1,2)`` while the V1 total stays 1.
+    """
+    values = json.loads((Path(__file__).resolve().parent / 'examples' / 'amendment.json')
+                        .read_text(encoding='utf-8'))
+    layouts = (
+        SegmentLayout(1, 'west', 'A', tuple(values['front']['beats'])),
+        SegmentLayout(2, 'east', 'B', tuple(values['back']['beats'])),
+    )
+    center_path = root / 'center-amendment.sqlite'
+    with closing(connect(center_path)) as center:
+        initialize_catalog(center)
+        initialize_intake(center)
+        initialize_review(center)
+        task = open_task(center, values['protocol'], values['unit'],
+                         values['threshold'], values['max_change'], layouts)
+        snapshot = get_task(center, task)
+        exported = {}
+        for slot, part, layout in zip((1, 2), (values['front'], values['back']), layouts,
+                                      strict=True):
+            path = root / f'amendment-station-{slot}.sqlite'
+            with closing(connect(path)) as db:
+                initialize_catalog(db)
+                initialize_ledger(db, layout.origin)
+                initialize_station(db)
+                install_task_snapshot(db, snapshot)
+                beats = layout.beats
+                original = record_segment(db, task, slot,
+                                          list(zip(beats, part['values'], strict=True)))
+                old_piece = freeze_segment(db, original)
+                exported[(slot, 'old')] = export_committed_segment(db, old_piece)
+                corrected_values = part.get('corrected_values')
+                if corrected_values is None:
+                    exported[(slot, 'new')] = exported[(slot, 'old')]
+                    exported[(slot, 'proof')] = None
+                else:
+                    corrected = record_segment(db, task, slot,
+                                               list(zip(beats, corrected_values, strict=True)),
+                                               parent_id=original)
+                    new_piece = freeze_segment(db, corrected)
+                    exported[(slot, 'new')] = export_committed_segment(db, new_piece)
+                    exported[(slot, 'proof')] = export_change_proof(db, old_piece, new_piece)
+        # Stations are closed from this point on.
+
+        old_ids = [accept_committed_segment(center, *exported[(slot, 'old')]) for slot in (1, 2)]
+        new_ids = [accept_committed_segment(center, *exported[(slot, 'new')]) for slot in (1, 2)]
+        old_report, _ = issue_review(center, task, *old_ids)
+        new_report, _ = issue_review(center, task, *new_ids)
+        proofs = {slot: exported[(slot, 'proof')] for slot in (1, 2)
+                  if exported[(slot, 'proof')] is not None}
+        amendment_id, receipt = issue_amendment(center, old_report, new_report, proofs)
+        signed = get_amendment(center, amendment_id)
+        old_totals = get_review(center, old_report).total_crossings
+        new_totals = get_review(center, new_report).total_crossings
+        checked((old_totals, new_totals), (values['old_total'], values['new_total']))
+        checked(signed['added'], tuple(map(tuple, values['added'])))
+        checked(signed['removed'], tuple(map(tuple, values['removed'])))
+
+    with closing(connect(center_path)) as reopened:
+        initialize_catalog(reopened)
+        initialize_intake(reopened)
+        initialize_review(reopened)
+        stored = get_amendment(reopened, amendment_id)
+        checked(stored, signed)
+        emit(
+            'amendment',
+            {'case': values['case'], 'old_total': old_totals, 'new_total': new_totals,
+             'threshold': values['threshold'], 'max_change': values['max_change'],
+             'stations_closed': True},
+            {'old_total': values['old_total'], 'new_total': values['new_total'],
+             'added': [list(pair) for pair in values['added']],
+             'removed': [list(pair) for pair in values['removed']]},
+            {'old_total': old_totals, 'new_total': new_totals,
+             'added': [list(pair) for pair in signed['added']],
+             'removed': [list(pair) for pair in signed['removed']]},
+            {'reports': list(signed['reports']), 'acceptances': [list(pair) for pair in signed['acceptances']],
+             'revisions': [list(pair) for pair in signed['revisions']],
+             'proof_digests': [list(item) for item in signed['proof_digests']],
+             'receipt': list(signed['receipt'])},
+            {'reports': list(stored['reports']), 'acceptances': [list(pair) for pair in stored['acceptances']],
+             'revisions': [list(pair) for pair in stored['revisions']],
+             'proof_digests': [list(item) for item in stored['proof_digests']],
+             'receipt': list(stored['receipt'])},
+            ['station/evidence.py', 'intake/commitment.py', 'intake/registry.py',
+             'review/amendment.py', 'review/issue.py', 'review/storage.py'],
+            '两站关闭后按首纳承诺与直接勘误证明核对整段；读数 0,1,0,0,0,0 改为 0,0,1,0,0,0，'
+            '总数同为 1，但告警从拍对 (0,1) 迁到 (1,2)。重开中心后按差异号取回同一签件。',
+        )
+
+
 def main():
     data = json.loads(SAMPLE.read_text(encoding='utf-8'))
     with TemporaryDirectory(prefix='yuwan-demo-') as folder:
         run(Path(folder), data)
+    with TemporaryDirectory(prefix='yuwan-amendment-demo-') as folder:
+        amendment_run(Path(folder))
 
 
 if __name__ == '__main__':

@@ -1,0 +1,24 @@
+{
+  "case": "same-total-moved-crossing",
+  "protocol": "榆湾次班勘误核对",
+  "unit": "kN",
+  "threshold": "1",
+  "max_change": "1",
+  "old_total": 1,
+  "new_total": 1,
+  "front": {
+    "origin": "west",
+    "rig": "A",
+    "beats": [0, 1, 2, 3, 4, 5],
+    "values": [0, 1, 0, 0, 0, 0],
+    "corrected_values": [0, 0, 1, 0, 0, 0]
+  },
+  "back": {
+    "origin": "east",
+    "rig": "B",
+    "beats": [6],
+    "values": [0]
+  },
+  "added": [[1, 2]],
+  "removed": [[0, 1]]
+}
