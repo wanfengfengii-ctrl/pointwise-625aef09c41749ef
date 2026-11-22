@@ -1,0 +1,19 @@
+{
+  "protocol": "榆湾白班承载检查",
+  "unit": "kN",
+  "threshold": "1",
+  "max_change": "1",
+  "front": {
+    "origin": "west",
+    "rig": "A",
+    "beats": [0, 1],
+    "values": [0, 0]
+  },
+  "back": {
+    "origin": "east",
+    "rig": "B",
+    "beats": [2, 3],
+    "values": [1, 1],
+    "corrected_values": [0, 0]
+  }
+}
